@@ -1,34 +1,32 @@
 import os
 import uuid
+import requests
 from dotenv import load_dotenv
-from google import genai
 from pinecone import Pinecone, ServerlessSpec
 
 load_dotenv()
 
-# Initialize the Gemini client — GEMINI_API_KEY is picked up automatically by the SDK.
-# Pass it explicitly here as a safety net for all environments.
-_gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-if not _gemini_key:
-    raise EnvironmentError("Neither GEMINI_API_KEY nor GOOGLE_API_KEY is set in the environment.")
+# ─── Ollama Embedding Configuration ──────────────────────────────────────────
+# Uses nomic-embed-text which produces 768-dimensional vectors.
+# Make sure to pull it first: `ollama pull nomic-embed-text`
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+EMBED_DIM = 768   # nomic-embed-text outputs 768 dimensions
 
-ai_client = genai.Client(api_key=_gemini_key)
-
+# ─── Pinecone Configuration ───────────────────────────────────────────────────
 _pinecone_key = os.getenv("PINECONE_API_KEY")
 if not _pinecone_key:
     raise EnvironmentError("PINECONE_API_KEY is not set in the environment.")
 
 pc = Pinecone(api_key=_pinecone_key)
 
-INDEX_NAME = "assistant-memory"
-EMBED_MODEL = "gemini-embedding-001"
-EMBED_DIM = 3072   # gemini-embedding-001 outputs 3072 dimensions
+INDEX_NAME = "assistant-memory-local"   # New index name (768-dim, different from the Gemini 3072-dim one)
 
 def setup_pinecone():
     """Creates the Pinecone index if it doesn't exist yet, then returns it."""
     existing = pc.list_indexes().names()
     if INDEX_NAME not in existing:
-        print(f"Creating Pinecone index '{INDEX_NAME}' (this takes about 60 seconds)...")
+        print(f"Creating Pinecone index '{INDEX_NAME}' (768-dim for nomic-embed-text)...")
         pc.create_index(
             name=INDEX_NAME,
             dimension=EMBED_DIM,
@@ -45,15 +43,29 @@ def setup_pinecone():
 index = setup_pinecone()
 
 def _embed(text: str) -> list:
-    """Helper: converts text to a Gemini embedding vector."""
-    response = ai_client.models.embed_content(
-        model=EMBED_MODEL,
-        contents=text,
-    )
-    return response.embeddings[0].values
+    """
+    Helper: converts text to an embedding vector using Ollama's local nomic-embed-text model.
+    Calls the Ollama /api/embeddings endpoint directly.
+    """
+    try:
+        response = requests.post(
+            f"{OLLAMA_BASE_URL}/api/embeddings",
+            json={"model": EMBED_MODEL, "prompt": text},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()["embedding"]
+    except requests.exceptions.ConnectionError:
+        raise RuntimeError(
+            f"Cannot connect to Ollama at {OLLAMA_BASE_URL}. "
+            "Make sure Ollama is running (`ollama serve`) and nomic-embed-text is pulled "
+            "(`ollama pull nomic-embed-text`)."
+        )
+    except Exception as e:
+        raise RuntimeError(f"Embedding error: {e}")
 
 def remember_this(text: str, category: str = "general"):
-    """Converts text to a vector and saves it to Pinecone."""
+    """Converts text to a local vector and saves it to Pinecone."""
     try:
         vector = _embed(text)
         doc_id = str(uuid.uuid4())
@@ -85,7 +97,7 @@ def recall(query: str, top_k: int = 2) -> str:
         return f"[Error recalling memory]: {e}"
 
 if __name__ == "__main__":
-    print("🧠 Vector Memory Online.")
+    print(f"🧠 Vector Memory Online — using Ollama ({EMBED_MODEL}) + Pinecone.")
     # Test saving a memory
     remember_this(
         "When starting a Spring Boot project, Ashen prefers to use MongoDB for the database.",
