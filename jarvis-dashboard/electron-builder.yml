@@ -1,5 +1,5 @@
-appId: com.electron.app
-productName: jarvis-dashboard
+appId: com.jarvis.ai
+productName: Jarvis
 directories:
   buildResources: build
 files:
@@ -8,15 +8,35 @@ files:
   - '!electron.vite.config.{js,ts,mjs,cjs}'
   - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
+# Bundle the compiled Python backend and .env into the installer.
+# --onedir mode produces: backend-dist/core_engine/core_engine.exe + all DLLs
+# We copy the whole core_engine/ folder into resources/backend-dist/ so the
+# exe lands at resources/backend-dist/core_engine.exe with DLLs alongside it.
+extraResources:
+  - from: '../backend-dist/core_engine'
+    to: 'backend-dist'
+    filter:
+      - '**/*'
+  - from: '../.env'
+    to: 'backend-dist/.env'
 asarUnpack:
   - resources/**
 win:
-  executableName: jarvis-dashboard
+  executableName: Jarvis
+  target:
+    - target: nsis
+      arch:
+        - x64
+  # Request microphone access on Windows (important for wake word)
+  requestedExecutionLevel: asInvoker
 nsis:
-  artifactName: ${name}-${version}-setup.${ext}
-  shortcutName: ${productName}
-  uninstallDisplayName: ${productName}
+  artifactName: Jarvis-${version}-Setup.${ext}
+  shortcutName: Jarvis
+  uninstallDisplayName: Jarvis AI Assistant
   createDesktopShortcut: always
+  createStartMenuShortcut: true
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
 mac:
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
