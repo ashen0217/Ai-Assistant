@@ -1,0 +1,35 @@
+# ─── Jarvis AI Assistant — Python Dependencies ───────────────────────────────
+# Install into venv: pip install -r requirements.txt
+#
+# After installing, build the backend exe:
+#   .\build_backend.ps1
+
+# ── Web server ────────────────────────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.12
+
+# ── AI / LLM clients ─────────────────────────────────────────────────────────
+openai>=1.30.0          # OpenAI-compatible client used for Ollama
+groq>=0.11.0            # Groq Whisper STT
+
+# ── Wake word engine ─────────────────────────────────────────────────────────
+openwakeword>=0.6.0
+onnxruntime>=1.18.0     # ONNX inference backend (Windows-friendly)
+
+# ── Audio I/O ─────────────────────────────────────────────────────────────────
+sounddevice>=0.4.6
+soundfile>=0.12.1
+
+# ── Numerical computing ───────────────────────────────────────────────────────
+numpy>=1.26.0
+
+# ── Database ──────────────────────────────────────────────────────────────────
+pymongo>=4.7.0
+
+# ── Vector memory ─────────────────────────────────────────────────────────────
+pinecone>=3.2.0
+requests>=2.31.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0
