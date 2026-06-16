@@ -1,17 +1,45 @@
 import os
+import sys
+
+# ─── Load .env FIRST — before any import that reads environment variables ─────
+# In dev mode: load_dotenv() finds .env in CWD (repo root where server.py lives)
+# Packaged mode (core_engine.exe): sys.executable is the exe path; .env sits
+# alongside it in the same backend-dist/ directory, so we point dotenv there.
+from dotenv import load_dotenv
+if getattr(sys, 'frozen', False):
+    _exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    _env_path = os.path.join(_exe_dir, '.env')
+    print(f"[SERVER] Packaged mode — loading .env from: {_env_path}")
+    load_dotenv(dotenv_path=_env_path, override=True)
+else:
+    load_dotenv()   # Dev mode: finds .env in CWD (repo root)
+
 import shutil
 import queue
 import threading
 import time
 import numpy as np
 import sounddevice as sd
-from openwakeword.model import Model
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from groq import Groq
 from main_agent import get_vision_response, fetch_user_profile
+
+
+# ─── Optional: OpenWakeWord (requires onnxruntime — may fail in packaged exe) ──────
+try:
+    from openwakeword.model import Model as OWWModel
+    OWW_AVAILABLE = True
+    print("[OWW] openwakeword loaded successfully.")
+except Exception as _oww_err:
+    OWWModel = None
+    OWW_AVAILABLE = False
+    print(f"[OWW] WARNING: openwakeword unavailable — wake word detection disabled.")
+    print(f"[OWW] Reason: {_oww_err}")
+    print("[OWW] All other Jarvis features (chat, STT, vision) remain fully functional.")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Jarvis Backend API")
@@ -25,8 +53,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Groq client for Whisper transcription
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+# Groq client — ONLY used for Whisper audio transcription (Ollama doesn't support STT)
+# If you don't need voice input, GROQ_API_KEY is not required.
+_groq_key = os.getenv("GROQ_API_KEY")
+groq_client = Groq(api_key=_groq_key) if _groq_key else None
 
 # ─── Shared wake-word event queue (one slot per detection) ────────────────────
 wake_queue: queue.Queue = queue.Queue()
@@ -38,9 +68,13 @@ def wake_word_thread():
     hey_jarvis ONNX model. When the wake word is detected it puts a WAKE event
     into wake_queue so the SSE endpoint can forward it to the React UI.
     """
+    if not OWW_AVAILABLE:
+        print("[OWW] Wake word engine skipped (openwakeword unavailable in packaged mode).")
+        return
+
     print("[OWW] Initializing OpenWakeWord engine (hey_jarvis / onnxruntime)...")
     try:
-        oww = Model(
+        oww = OWWModel(
             wakeword_models=["hey_jarvis"],
             inference_framework="onnx",    # works on Windows without tflite-runtime
         )
@@ -135,7 +169,7 @@ def get_status():
 
 @app.post("/api/chat")
 def chat_endpoint(payload: ChatRequest):
-    """Triggers screen capture, memory recall, and Llama 4 Scout inference."""
+    """Sends message to local Ollama qwen2.5:3b model with memory context."""
     try:
         print(f"[CHAT] Received UI message: {payload.message}")
         ai_response = get_vision_response(payload.message)
@@ -148,7 +182,14 @@ async def transcribe_audio(file: UploadFile = File(...)):
     """
     Accepts an audio file (webm/wav/mp3), sends it to Groq Whisper,
     and returns the transcription as JSON: {"text": "..."}.
+    Requires GROQ_API_KEY to be set. Returns 503 if unavailable.
     """
+    if groq_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Voice transcription is unavailable: GROQ_API_KEY is not configured.",
+        )
+
     temp_path = "temp_audio.webm"
     try:
         with open(temp_path, "wb") as buf:
@@ -177,5 +218,9 @@ async def transcribe_audio(file: UploadFile = File(...)):
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    print("[SERVER] Jarvis API Server initializing...")
+    ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    ollama_model = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
+    print(f"[SERVER] Jarvis API Server initializing...")
+    print(f"[SERVER] AI Model: {ollama_model} @ {ollama_url}")
+    print(f"[SERVER] Voice STT: {'Groq Whisper (active)' if os.getenv('GROQ_API_KEY') else 'Disabled (no GROQ_API_KEY)'}")
     uvicorn.run(app, host="127.0.0.1", port=8000, reload=False)
