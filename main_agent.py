@@ -1,27 +1,35 @@
 import os
-import time
 import threading
-import base64
-import mss
-import mss.tools
-from PIL import Image
-import io
 from dotenv import load_dotenv
 from openai import OpenAI
 from pymongo import MongoClient
 
-# Import your vector memory functions (Gemini still handles embeddings in the background)
+# Import your vector memory functions (Ollama handles embeddings locally)
 from vector_memory import recall, remember_this
 
 load_dotenv()
 
-# 1. Initialize the Groq Client (using the OpenAI library)
-groq_client = OpenAI(
-    api_key=os.getenv("GROQ_API_KEY"),
-    base_url="https://api.groq.com/openai/v1",
-    timeout=30.0,       # Hard timeout: 30s for any API call
-    max_retries=2,      # Auto-retry on transient network errors
+# ─── Ollama Client (OpenAI-compatible local endpoint) ────────────────────────
+# Make sure Ollama is running: `ollama serve`
+# Make sure the model is pulled: `ollama pull qwen2.5:3b`
+#
+# NOTE: .env stores OLLAMA_BASE_URL without /v1 (e.g. http://localhost:11434)
+# so that vector_memory.py can use it for raw /api/embeddings calls.
+# The OpenAI-compatible client requires the /v1 suffix, so we add it here
+# defensively (stripping any accidental trailing /v1 first to avoid doubling).
+_ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+if _ollama_base.endswith("/v1"):
+    _ollama_v1_url = _ollama_base
+else:
+    _ollama_v1_url = f"{_ollama_base}/v1"
+
+ollama_client = OpenAI(
+    api_key="ollama",          # Ollama doesn't require a real key
+    base_url=_ollama_v1_url,   # Must be http://host:port/v1
 )
+
+
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
 
 # Initialize MongoDB with a sensible server selection timeout
 mongo_client = MongoClient(
@@ -42,24 +50,8 @@ def fetch_user_profile() -> dict:
         print(f"[Warning] MongoDB fetch failed: {e}. Using default profile.")
         return {"current_focus": "Building an AI", "tech_stack": ["Python"], "current_emotion": "neutral"}
 
-def capture_screen_base64() -> str:
-    """Captures the screen, downscales it, and converts it to a lightweight JPEG Base64 string."""
-    with mss.MSS() as sct:
-        monitor = sct.monitors[1]
-        sct_img = sct.grab(monitor)
-
-        # Downscale by 50% to ensure fast API responses and stay under Groq's 4MB limit
-        img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-        new_size = (int(img.width * 0.5), int(img.height * 0.5))
-        img = img.resize(new_size, Image.Resampling.LANCZOS)
-
-        # Convert to Base64 using JPEG compression
-        byte_io = io.BytesIO()
-        img.save(byte_io, format='JPEG', quality=85)
-        return base64.b64encode(byte_io.getvalue()).decode('utf-8')
-
 def summarize_and_save(user_msg: str, ai_response: str):
-    """Background task using Groq to summarize and Pinecone to save."""
+    """Background task using Ollama to summarize and Pinecone to save."""
     try:
         summary_prompt = (
             "Analyze this interaction. If it contains a specific technical problem and a solution, "
@@ -68,9 +60,10 @@ def summarize_and_save(user_msg: str, ai_response: str):
             "reply with EXACTLY the word: SKIP\n\n"
             f"User: {user_msg}\nAI: {ai_response}"
         )
-        response = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",   # The fast text model for background summaries
+        response = ollama_client.chat.completions.create(
+            model=OLLAMA_MODEL,
             messages=[{"role": "user", "content": summary_prompt}],
+            temperature=0.3,
         )
         summary = response.choices[0].message.content.strip()
 
@@ -84,8 +77,10 @@ def summarize_and_save(user_msg: str, ai_response: str):
         print(f"[Background save error]: {e}")
 
 def get_vision_response(user_input: str) -> str:
-    """Combines context and sends it to Groq's Llama 4 Scout Vision model."""
-
+    """
+    Sends user input to the local Ollama qwen2.5:3b model with full context.
+    Note: Screen capture/vision is not supported by qwen2.5:3b — text-only mode.
+    """
     profile = fetch_user_profile()
     current_focus = profile.get("current_focus", "N/A")
     tech_stack = ", ".join(profile.get("tech_stack", []))
@@ -95,33 +90,25 @@ def get_vision_response(user_input: str) -> str:
     past_knowledge = recall(user_input)
 
     system_message = (
-        "You are an advanced multimodal personal AI assistant.\n"
-        f"The human engineer you are helping is named Ashen.\n"
+        "You are Jarvis, an advanced personal AI assistant running fully locally.\n"
+        f"The engineer you are helping is named Ashen.\n"
         f"His Focus: '{current_focus}', Stack: [{tech_stack}].\n"
         f"He is currently feeling: {current_emotion}.\n"
         f"Past knowledge of fixes:\n{past_knowledge}\n\n"
-        "Analyze his screen and his message. Provide a precise, concise engineering solution. "
+        "Provide a precise, concise engineering solution. "
         "Address him by name occasionally."
     )
 
-    print("[Capturing screen & processing via Groq Vision...]")
-    base64_image = capture_screen_base64()
-    image_url = f"data:image/jpeg;base64,{base64_image}"
+    print(f"[Ollama] Sending request to {OLLAMA_MODEL} at {os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434/v1')}...")
 
     try:
-        # Llama 4 Scout is the current recommended Groq vision model (replaces deprecated llama-3.2-11b-vision-preview)
-        response = groq_client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
+        response = ollama_client.chat.completions.create(
+            model=OLLAMA_MODEL,
             messages=[
                 {"role": "system", "content": system_message},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": user_input},
-                        {"type": "image_url", "image_url": {"url": image_url}},
-                    ],
-                },
+                {"role": "user", "content": user_input},
             ],
+            temperature=0.7,
         )
 
         ai_text = response.choices[0].message.content
@@ -133,10 +120,10 @@ def get_vision_response(user_input: str) -> str:
         return ai_text
 
     except Exception as e:
-        return f"Groq Vision Error: {str(e)}"
+        return f"Ollama Error: {str(e)}\n\nMake sure Ollama is running (`ollama serve`) and the model is pulled (`ollama pull {OLLAMA_MODEL}`)."
 
 if __name__ == "__main__":
-    print("🤖 Groq Vision Agent Online (MongoDB + Pinecone + Screen Eyes Active).")
+    print(f"🤖 Jarvis Agent Online — Powered by {OLLAMA_MODEL} via Ollama (MongoDB + Pinecone Active).")
     print("Type 'exit' to quit.\n")
 
     while True:
