@@ -1,18 +1,18 @@
 import os
 import time
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from openai import OpenAI
 from pymongo import MongoClient
 
 load_dotenv()
 
-# Initialize Clients
-_gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-if not _gemini_key:
-    raise EnvironmentError("Neither GEMINI_API_KEY nor GOOGLE_API_KEY is set in the environment.")
+# ─── Ollama Client (OpenAI-compatible local endpoint) ────────────────────────
+ollama_client = OpenAI(
+    api_key="ollama",                      # Ollama doesn't require a real key
+    base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+)
 
-client = genai.Client(api_key=_gemini_key)
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
 
 mongo_client = MongoClient(
     os.getenv("MONGODB_URI"),
@@ -33,13 +33,13 @@ def fetch_user_profile() -> dict:
         return {"current_focus": "Unknown", "tech_stack": []}
 
 def get_ai_response(user_input: str) -> str:
-    """Calls Gemini with exponential backoff on transient errors."""
+    """Calls local Ollama model with exponential backoff on transient errors."""
     profile = fetch_user_profile()
     current_focus = profile.get("current_focus", "N/A")
     tech_stack = ", ".join(profile.get("tech_stack", []))
 
     system_instruction = (
-        "You are an elite, proactive personal AI assistant for Ashen.\n"
+        "You are Jarvis, an elite proactive personal AI assistant for Ashen.\n"
         f"His current focus is: {current_focus}.\n"
         f"His core tech stack includes: {tech_stack}.\n\n"
         "Your job is to look at his inputs and provide highly contextual, "
@@ -49,28 +49,25 @@ def get_ai_response(user_input: str) -> str:
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash-lite",   # Updated from decommissioned gemini-3.1-flash-lite
-                contents=user_input,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=0.7,
-                ),
+            response = ollama_client.chat.completions.create(
+                model=OLLAMA_MODEL,
+                messages=[
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": user_input},
+                ],
+                temperature=0.7,
             )
-            return response.text
+            return response.choices[0].message.content
         except Exception as e:
             err = str(e)
-            if "503" in err or "429" in err or "overloaded" in err.lower():
-                wait = 2 ** attempt   # Exponential backoff: 1s, 2s, 4s
-                print(f"[Retry {attempt + 1}/{max_retries}] API busy — waiting {wait}s...")
-                time.sleep(wait)
-            else:
-                return f"Error: {err}"
+            wait = 2 ** attempt   # Exponential backoff: 1s, 2s, 4s
+            print(f"[Retry {attempt + 1}/{max_retries}] Ollama error — waiting {wait}s... ({err})")
+            time.sleep(wait)
 
-    return "The AI servers are currently overloaded. Please try again in a moment."
+    return "Ollama is currently unavailable. Make sure `ollama serve` is running."
 
 if __name__ == "__main__":
-    print("🧠 AI Brain connected to MongoDB. Ready for instructions:\n")
+    print(f"🧠 AI Brain connected to MongoDB. Running on Ollama ({OLLAMA_MODEL}). Ready:\n")
     while True:
         try:
             user_msg = input("You: ").strip()
